@@ -10,8 +10,8 @@ if (module.hot) {
 
 const column_info = [
     {id: "model", group: null, name: "Name", geom: "text", palette: null},
-    {id: "mpg", group: "overall", name: "Miles / gallon", geom: "bar", palette: "palette1", options: {width: 4, legend: false}},
-    {id: "cyl", group: "overall", name: "Number of cylinders", geom: "bar", palette: "palette2", options: {width: 4, legend: false}},
+    {id: "mpg", group: "overall_1", name: "Miles / gallon", geom: "bar", palette: "palette1", options: {width: 4}},
+    {id: "cyl", group: "overall_2", name: "Number of cylinders", geom: "bar", palette: "palette2", options: {width: 4}},
     {id: "disp", group: "group1", name: "Displacement (cu.in.)", geom: "funkyrect", palette: "palette1"},
     {id: "hp", group: "group1", name: "Gross horsepower", geom: "funkyrect", palette: "palette1"},
     {id: "drat", group: "group1", name: "Rear axle ratio", geom: "funkyrect", palette: "palette1"},
@@ -21,14 +21,20 @@ const column_info = [
     {id: "am", group: "group2", name: "Transmission", geom: "circle", palette: "palette2"},
     {id: "gear", group: "group2", name: "# Forward gears", geom: "circle", palette: "palette2"},
     {id: "carb", group: "group2", name: "# Carburetors", geom: "circle", palette: "palette2"},
-    {id: "schema", group: "group2", name: "Schema", geom: "image", width: 25},
+    {id: "schema", group: "group2", name: "Schema", geom: "image", width: 25, id_hover_text: "engine_type"},
     {id: "load", group: "group2", name: "Load", geom: "pie", palette: "load"}
 ];
 
 const column_groups = [
-    {level1: "Overall", group: "overall", palette: "overall"},
+    {level1: "Overall", level2: "Left", group: "overall_1", palette: "overall"},
+    {level1: "Overall", level2: "Right", group: "overall_2", palette: "overall"},
     {level1: "Group 1", group: "group1", palette: "palette1"},
     {level1: "Group 2", group: "group2", palette: "palette2"}
+];
+
+const row_groups = [
+    {group: 'first', Group: 'First'},
+    {group: 'second', Group: 'Seconds'}
 ];
 
 const palettes = {
@@ -61,22 +67,26 @@ d3.csv('mtcars.csv').then((data) => {
     data = data.slice(0, 20);
     data.forEach((d, i) => {
         d.schema = i % 2 ? "electric.png" : "ice.png";
+        d.engine_type = i % 2 ? 'Electric' : 'Gas';
+        d.engine_type += ` (${d.hp}🐴)`;
         d.load = [(i % 3) / 6, ((i + 1) % 3) / 6, 0];
         d.load[2] = 1 - d.load[0] - d.load[1];
+    });
+    const row_info = data.map((_, i) => {
+        return {group: i < 10 && 'first' || 'second'}
     });
     d3.select("#app").node().appendChild(funkyheatmap(
         data,
         column_info,
-        undefined, // row info
-        undefined, // column_groups,
-        undefined, // row groups
+        row_info,
+        column_groups,
+        row_groups,
         palettes,
-        legends, // legends
-        {rowHeight: 28, expand_ymax: 20},
-        {
+        legends,
+        {rowHeight: 28}, // position arguments
+        { // heatmap options
             labelGroupsAbc: true,
             colorByRank: true
-        },
-        true
+        }
     ));
 });

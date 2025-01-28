@@ -1,31 +1,89 @@
 import * as d3 from 'd3';
 import * as _ from 'lodash';
 
-import { maybeConvertDataframe } from './input_util';
-import { buildColumnInfo, buildColumnGroups, Column } from './columns';
+import { ensureRowData, rowToColData } from './input_util';
+import { createColumns, buildColumnGroups, Column } from './columns';
 import { assignPalettes } from './palettes';
 import { prepareLegends } from './legends';
 import { GEOMS } from './geoms';
 
 
 /**
+ * @typedef {Object} ColumnData
+ * @description A dataframe in column-based format. Each property is a column, represented as an
+ *   array. All columns are of the same length.
+ * @example
+ * {
+ *   'model': ['Toyota Corolla', 'Fiat 128', 'Honda Civic'],
+ *   'mpg': [33.9, 32.4, 30.4],
+ *   'weight': [1.835, 2.2, 1.615]
+ * }
+ */
+
+/**
+ * @typedef {Object[]} RowData
+ * @description A dataframe in row-based format. Each element is an object with properties. All
+ *   objects have the same properties.
+ * @example
+ * [
+ *   {model: 'Toyota Corolla', mpg: 33.9, weight: 1.835},
+ *   {model: 'Fiat 128', mpg: 32.4, weight: 2.2},
+ *   {model: 'Honda Civic', mpg: 30.4, weight: 1.615}
+ * ]
+ */
+
+/**
  * @typedef {Object} HeatmapOptions
+ * @property {boolean} [colorByRank=false] - whether to color elements by rank, default for all
+ *   numeric columns
+ * @property {number} [legendFontSize=12] - font size for legend labels
+ * @property {boolean} [labelGroupsAbc=false] - whether to add alphabetical index to column groups
+ *   labels
+ * @property {number} [tooltipPrecision=4] - number of decimal places for floats in the tooltip
+ * @property {Object} [theme] - theme options
+ * @property {string} [theme.oddRowBackground='white'] - background color for odd rows
+ * @property {string} [theme.evenRowBackground='#eee'] - background color for even rows
+ * @property {string} [theme.textColor='black'] - color for text
+ * @property {string} [theme.strokeColor='#555'] - edge color for geoms and guides
+ * @property {string} [theme.headerColorL1='white'] - color for column groups of the first level
+ * @property {string} [theme.headerColorRest='black'] - color for column groups if the other levels
+ * @property {string} [theme.hoverColor='#1385cb'] - color for hovered text
  */
 const DEFAULT_OPTIONS = {
     legendFontSize: 12,
     legendTicks: [0, 0.2, 0.4, 0.6, 0.8, 1],
     labelGroupsAbc: false,
     colorByRank: false,
+    tooltipPrecision: 4,
     theme: {
         oddRowBackground: 'white',
         evenRowBackground: '#eee',
         textColor: 'black',
         strokeColor: '#555',
-        headerColor: 'black',
+        headerColorL1: 'white',
+        headerColorRest: 'black',
         hoverColor: '#1385cb'
     }
 };
 
+/**
+ * @typedef {Object} PositionOptions
+ * @property {number} [rowHeight=24] - height of a heatmap row, in pixels
+ * @property {number} [rowSpace=0.1] - space between rows, as a fraction of rowHeight. Twice the
+ *   padding
+ * @property {number} [rowBigspace=1] - space between groups of rows, as a fraction of rowHeight
+ * @property {number} [colWidth=24] - width of a heatmap column, in pixels. Deprecated, has no
+ *   effect
+ * @property {number} [colSpace=0.1] - space between columns, as a fraction of rowHeight. Twice the
+ *   padding
+ * @property {number} [colBigspace=1] - space between groups of columns, as a fraction of rowHeight
+ * @property {number} [colAnnotOffset=10] - offset of column groups from column labels, in pixels
+ * @property {number} [colAnnotAngle=30] - angle of column labels, in degrees
+ * @property {number} [padding=5] - padding for various uses
+ * @property {number} [minGeomSize=0.25] - minimum size of a heatmap element, in pixels
+ * @property {number} [funkyMidpoint=0.8] - midpoint for funkyrect geom, see
+ *   {@link module:geoms.funkyrect|funkyrect}
+ */
 const DEFAULT_POSITION_ARGS = {
     rowHeight: 24,
     rowSpace: 0.1,
@@ -42,53 +100,29 @@ const DEFAULT_POSITION_ARGS = {
 
 /**
  * Positional options for the heatmap.
- *
- * Configurable options:
- * @property {number} rowHeight - height of a heatmap row, in pixels
- * @property {number} rowSpace - space between rows, as a fraction of rowHeight. Twice the padding
- * @property {number} rowBigspace - space between groups of rows, as a fraction of rowHeight
- * @property {number} colSpace - space between columns, as a fraction of rowHeight. Twice the
- *   padding
- * @property {number} colAnnotOffset - offset of column groups from column labels, in pixels
- * @property {number} colAnnotAngle - angle of column labels, in degrees
- * @property {number} padding - padding used in certain places. TODO: document
- * @property {number} minGeomSize - minimum size of a heatmap element, in pixels
- * @property {number} funkyMidpoint - midpoint for funkyrect geom
- *
- * Calculated options:
- * @property {number} rowSpacePx - space between rows, in pixels
- * @property {number} rowBigspacePx - space between groups of rows, in pixels
- * @property {number} colSpacePx - space between columns, in pixels
- * @property {number} geomSize - size of a heatmap element, in pixels
- * @property {number} geomPadding - padding around heatmap elements, in pixels
- * @property {number} geomPaddingX - padding around heatmap elements in the x direction, in pixels
- * @property {number} bodyHeight - height of the heatmap body, in pixels
- * @property {number} bodyWidth - width of the heatmap body, in pixels
- * @property {number} width - width of the heatmap, in pixels, including header and footer
- * @property {number} headerHeight - height of the header, in pixels
- * @property {number} footerHeight - height of the footer, in pixels
- * @property {number} footerOffset - offset of the footer from the left edge of the heatmap, in pixels
+ * @extends PositionOptions
+ * @property {number} rowSpacePx - space between rows, in pixels. _Calculated_
+ * @property {number} rowBigspacePx - space between groups of rows, in pixels. _Calculated_
+ * @property {number} colSpacePx - space between columns, in pixels. _Calculated_
+ * @property {number} geomSize - size of a heatmap element, in pixels. _Calculated_
+ * @property {number} geomPadding - padding around heatmap elements, in pixels. _Calculated_
+ * @property {number} geomPaddingX - padding around heatmap elements in the x direction, in pixels.
+ *   _Calculated_
+ * @property {number} bodyHeight - height of the heatmap body, in pixels. _Calculated_
+ * @property {number} bodyWidth - width of the heatmap body, in pixels. _Calculated_
+ * @property {number} width - width of the heatmap, in pixels, including header and footer.
+ *   _Calculated_
+ * @property {number} headerHeight - height of the header, in pixels. _Calculated_
+ * @property {number} footerHeight - height of the footer, in pixels. _Calculated_
+ * @property {number} footerOffset - offset of the footer from the left edge of the heatmap,
+ *   in pixels. _Calculated_
  */
 class PositionArgs {
     /**
-     * @param {Object} args - object with positional options
-     * @param {number} [args.rowHeight=24] - height of a heatmap row, in pixels
-     * @param {number} [args.rowSpace=0.1] - space between rows, as a fraction of rowHeight.
-     *   Twice the padding
-     * @param {number} [args.rowBigspace=1] - space between groups of rows, as a fraction of
-     *   rowHeight
-     * @param {number} [args.colWidth=24] - width of a heatmap column, in pixels.
-     *   Deprecated, has no effect
-     * @param {number} [args.colSpace=0.1] - space between columns, as a fraction of rowHeight.
-     *   Twice the padding
-     * @param {number} [args.colBigspace=1] - space between groups of columns, as a fraction of
-     *   rowHeight. Currently not used
-     * @param {number} [args.colAnnotOffset=3] - offset of column groups from column labels,
-     *   in pixels
-     * @param {number} [args.colAnnotAngle=30] - angle of column labels, in degrees
-     * @param {number} [args.padding=5] - padding around heatmap elements, in pixels
-     * @param {number} [args.minGeomSize=0.25] - minimum size of a heatmap element, in pixels
-     * @param {number} [args.funkyMidpoint=0.8] - midpoint for funkyrect geom
+     * Initialize the PositionArgs object from the provided options. Handles deprecation warnings
+     * and calls {@link PositionArgs#calculate|calculate} to pre-calculate values.
+     *
+     * @param {PositionOptions} args - object with positional options
      */
     constructor(args) {
         _.extend(this, DEFAULT_POSITION_ARGS);
@@ -142,7 +176,7 @@ class PositionArgs {
  * Heatmap class
  * @property {PositionArgs} positionArgs
  */
-class FHeatmap {
+class FunkyHeatmap {
     constructor(
         data,
         columnInfo,
@@ -174,7 +208,7 @@ class FHeatmap {
         this.renderGroups = false;
 
         this.rowGroupOrder = [];
-        // if we don't have row groups, put all rows in unnamed group
+        // if we don't have row groups, put all rows in an unnamed group
         if (this.rowInfo.length === 0 || this.rowInfo[0].group === undefined) {
             this.rowInfo = this.data.map(_ => { return {group: ''} });
         }
@@ -238,10 +272,6 @@ class FHeatmap {
             if (prevColGroup && column.group && prevColGroup !== column.group) {
                 offset += 2 * P.padding;
             }
-            let rankedData;
-            if (O.colorByRank && column.numeric) {
-                rankedData = d3.rank(this.data, item => +item[column.id]);
-            }
             let rowGroup, nGroups = 0;
             this.data.forEach((item, j) => {
                 let width = 0;
@@ -257,25 +287,30 @@ class FHeatmap {
                         P
                     );
                     groupName
-                        .attr('transform', `translate(${offset - padding}, ${(j + nGroups - 1) * P.rowHeight})`)
+                        .classed('fh-row-group-name', true)
+                        .attr('transform', `translate(${offset - padding}, ${(j + nGroups - 1) * P.rowHeight - 2 * P.geomPadding})`)
                         .attr('font-weight', 'bold')
                         .attr('dominant-baseline', 'hanging');
                     this.body.append(() => groupName.node());
                     width = groupName.node().getBBox().width;
+                    if (nGroups > 1) {
+                        const rowGroupWhiteBack = d3.create('svg:rect')
+                            .classed('fh-row-group-back', true)
+                            .attr('x', 0)
+                            .attr('y', 0)
+                            .attr('height', P.rowHeight)
+                            .attr('fill', O.theme.oddRowBackground)
+                            .attr('transform', `translate(${offset - padding}, ${(j + nGroups - 1) * P.rowHeight})`);
+                        this.body.append(() => rowGroupWhiteBack.node());
+                    }
                 }
                 rowGroup = item[this.rowGroupKey];
-                let value = item[column.id];
+                let value = column.getValue(item);
                 if (value === undefined || value === null || (isNaN(value) && column.numeric)) {
                     return;
                 }
-                let colorValue = value;
+                let colorValue = column.getColorValue(item, j);
                 let label;
-                if (column.numeric) {
-                    value = +value;
-                }
-                if (O.colorByRank && column.numeric) {
-                    colorValue = rankedData[j];
-                }
                 if (column.label) {
                     label = item[column.label];
                 }
@@ -290,8 +325,14 @@ class FHeatmap {
                     const g = d3.create('svg:g')
                         .classed('fh-geom', true);
                     g.append(() => el.classed('fh-geom', false).classed('fh-orig-geom', true).node());
+                    // By default place label in the center of the geom
+                    let labelX = P.rowHeight / 2;
+                    if (column.geom === 'bar') {
+                        // Bars are of different widths, place label on the left
+                        labelX = P.padding + P.geomPaddingX * 3;
+                    }
                     g.append('text')
-                        .attr('x', P.rowHeight / 2)
+                        .attr('x', labelX)
                         .attr('y', P.rowHeight / 2)
                         .attr('text-anchor', 'middle')
                         .attr('dominant-baseline', 'central')
@@ -300,16 +341,15 @@ class FHeatmap {
                     el = g;
                 }
                 el.attr('transform', `translate(${offset}, ${(j + nGroups) * P.rowHeight})`);
-                if (column.numeric && !label) {
-                    let tooltip = (+value).toFixed(4);
-                    tooltip = tooltip.replace(/\.?0+$/, '');
-                    el.datum({tooltip: tooltip});
+                const tooltipValue = column.getHoverText(item, O.tooltipPrecision);
+                if (tooltipValue !== undefined) {
+                    el.datum({tooltip: tooltipValue});
                 }
                 if (column.geom === 'pie') {
-                    const s = 'margin: 5px; border-top: 1px solid #aaa; border-left: 1px solid #aaa; font-size: 80%';
+                    const s = 'margin: 5px; border-collapse: collapse; border-top: 1px solid #aaa; border-left: 1px solid #aaa; font-size: 80%';
                     const s2 = 'padding: 2px 4px; border-bottom: 1px solid #aaa; border-right: 1px solid #aaa';
                     let tooltip = `<table style="${s}">${column.palette.colorNames.map((colorName, i) => {
-                        return `<tr><td style="${s2}">${colorName}:</td><td style="${s2}">${value[i]}</td></tr>`;
+                        return `<tr><td style="${s2}">${colorName}:</td><td style="${s2}">${value[i].toFixed(O.tooltipPrecision)}</td></tr>`;
                     }).join('')}</table>`;
                     el.datum({tooltip: tooltip});
                 }
@@ -332,7 +372,7 @@ class FHeatmap {
                 if (label) {
                     label = el.select('text');
                     let fontSize = 100;
-                    for (let q = 0; q < 8; q++) {
+                    for (let q = 0; q < 12; q++) {
                         const { width } = label.node().getBBox();
                         if (width > P.geomSize - P.geomPaddingX * 2) {
                             fontSize -= 5;
@@ -343,7 +383,7 @@ class FHeatmap {
                     }
                 }
             });
-            if (column.geom === 'bar') {
+            if (column.geom === 'bar' && column.options.drawGuide !== false) {
                 maxWidth = P.geomSize * column.width + P.geomPadding;
                 this.body.append('line')
                     .attr('x1', offset + maxWidth)
@@ -361,6 +401,8 @@ class FHeatmap {
             prevColGroup = column.group;
         });
         P.bodyWidth = offset + P.colSpacePx;
+        this.body.selectAll('.fh-row-group-back').attr('width', P.bodyWidth).raise();
+        this.body.selectAll('.fh-row-group-name').raise();
     }
 
     renderHeader() {
@@ -371,57 +413,105 @@ class FHeatmap {
         let bodyWidth = 0;
         let nonZeroRotate = false;
         const groups = this.header.append('g');
-        const labels = this.header.append('g')
-            .attr('transform', `translate(0, ${P.rowHeight + P.colAnnotOffset})`);
 
-        const columnGroups = d3.group(this.columnInfo, column => column.group);
-        let abcCounter = 0;
-        columnGroups.forEach((group, groupName) => {
-            if (!groupName) {
-                return;
-            }
-            const groupInfo = this.columnGroups.get(groupName);
-            const column = new Column({
-                id: '_group',
-                palette: groupInfo.palette
-            }, 1);
-            column.maybeCalculateStats(null, false);
-            assignPalettes([column], this.palettes);
-            const lastCol = group[group.length - 1];
-            const groupStart = group[0].offset;
-            const groupEnd = lastCol.offset + lastCol.widthPx + P.geomPadding;
-            const fill = column.palette == 'none' && 'transparent' || column.palette(0.5);
-            groups.append('rect')
-                .attr('x', groupStart)
-                .attr('y', 0)
-                .attr('width', groupEnd - groupStart)
-                .attr('height', P.rowHeight)
-                .attr('fill', fill)
-                .attr('opacity', 0.25);
-            const text = groups.append('text')
-                .attr('x', groupStart + (groupEnd - groupStart) / 2)
-                .attr('y', P.rowHeight / 2)
-                .attr('text-anchor', 'middle')
-                .attr('dominant-baseline', 'central')
-                .attr('fill', O.theme.headerColor)
-                .text(groupInfo.level1);
-            if (O.fontSize) {
-                text.attr('font-size', O.fontSize);
-            }
-            if (O.labelGroupsAbc) {
-                const letter = String.fromCharCode("a".charCodeAt(0) + abcCounter);
-                const text = groups.append('text')
-                    .attr('x', groupStart + P.padding)
-                    .attr('y', P.rowHeight / 2)
-                    .attr('dominant-baseline', 'central')
-                    .attr('fill', O.theme.headerColor)
-                    .text(`${letter})`);
-                if (O.fontSize) {
-                    text.attr('font-size', O.fontSize);
+        const nLevels = Math.max(...this.columnGroups.values().map(group => {
+            let i = 1;
+            while (true) {
+                if (group[`level${i}`] === undefined) {
+                    break;
                 }
+                i += 1;
             }
-            abcCounter += 1;
-        });
+            return i - 1;
+        }));
+        const groupsHeight = this.columnGroups.size === 0 ? 0 : nLevels * (P.rowHeight + P.padding);
+
+        const labels = this.header.append('g')
+            .attr('transform', `translate(0, ${groupsHeight + P.colAnnotOffset})`);
+
+        let abcCounter = 0;
+        for (let level = 0; level < nLevels; level++) {
+            const levelID = `level${level + 1}`;
+            let levelName;
+            let groupStart;
+            // iterate over columns _in order_
+            this.columnInfo.forEach((column, columnIdx) => {
+                const groupInfo = this.columnGroups.get(column.group);
+
+                let nextCol, nextColGroup;
+                // peek at the next column group. If we're at the last column, or if the next group
+                // is empty, it's the same: we draw current group
+                if (this.columnInfo.length > columnIdx + 1) {
+                    nextCol = this.columnInfo[columnIdx + 1];
+                    nextColGroup = this.columnGroups.get(nextCol.group);
+                }
+
+                if (groupInfo && groupInfo[levelID] !== undefined && levelName === undefined) {
+                    // start a new group if we haven't started yet
+                    levelName = groupInfo[levelID];
+                    groupStart = column.offset;
+                }
+                if (levelName !== undefined
+                    && (nextColGroup === undefined
+                        || levelName !== nextColGroup[levelID])
+                ) {
+                    // if we have a group and the next column is not in the same group, draw the
+                    // current group until the current column
+                    const groupEnd = column.offset + column.widthPx + P.geomPadding;
+                    const groupCol = new Column({
+                        id: '_group',
+                        palette: groupInfo.palette
+                    }, [1]);
+                    assignPalettes([groupCol], this.palettes);
+                    const fill = (
+                        groupCol.palette == 'none' && 'transparent' || groupCol.palette(0.5)
+                    );
+                    const yOffset = level * P.rowHeight + level * P.padding;
+                    const rect = groups.append('rect')
+                        .attr('x', groupStart)
+                        .attr('y', yOffset)
+                        .attr('width', groupEnd - groupStart)
+                        .attr('height', P.rowHeight)
+                        .attr('fill', fill)
+                        .attr('opacity', level === 0 && 1 || 0.25);
+                    const text = groups.append('text')
+                        .attr('x', groupStart + (groupEnd - groupStart) / 2)
+                        .attr('y', yOffset + P.rowHeight / 2)
+                        .attr('text-anchor', 'middle')
+                        .attr('dominant-baseline', 'central')
+                        .attr(
+                            'fill',
+                            level === 0 && O.theme.headerColorL1 || O.theme.headerColorRest
+                        )
+                        .text(levelName);
+                    if (O.fontSize) {
+                        text.attr('font-size', O.fontSize);
+                    }
+                    const { width } = text.node().getBBox();
+                    if (width + 2 * P.padding > groupEnd - groupStart) {
+                        const diff = width + 2 * P.padding - (groupEnd - groupStart);
+                        rect.attr('width', width + 2 * P.padding);
+                        rect.attr('x', groupStart - diff / 2);
+                    }
+                    if (O.labelGroupsAbc && level === 0) {
+                        // only add ABC labels for the first level
+                        const letter = String.fromCharCode("a".charCodeAt(0) + abcCounter);
+                        const text = groups.append('text')
+                            .attr('x', groupStart + P.padding)
+                            .attr('y', yOffset + P.rowHeight / 2)
+                            .attr('dominant-baseline', 'central')
+                            .attr('fill', O.theme.headerColorL1)
+                            .text(`${letter})`);
+                        if (O.fontSize) {
+                            text.attr('font-size', O.fontSize);
+                        }
+                    }
+                    abcCounter += 1;
+                    // we have drawn the group, reset the variables
+                    levelName = undefined;
+                }
+            });
+        }
 
         this.columnInfo.forEach((column, i) => {
             const el = labels.append('g')
@@ -479,7 +569,7 @@ class FHeatmap {
             }
         });
         P.width = bodyWidth;
-        P.headerHeight = headerHeight + P.rowHeight + P.colAnnotOffset;
+        P.headerHeight = headerHeight + groupsHeight + P.colAnnotOffset;
     }
 
     renderLegends() {
@@ -540,14 +630,23 @@ class FHeatmap {
                     const geom = GEOMS.rect(size, colorValue, legend, O, P);
                     geom.attr('transform', `translate(${myOffset}, ${offsetY + P.padding})`);
                     el.append(() => geom.node());
+                    let x = myOffset;
+                    let textAnchor = 'start';
+                    if (legend.label_align === 'center') {
+                        x += P.rowHeight / 2;
+                        textAnchor = 'middle';
+                    } else if (legend.label_align === 'right') {
+                        x += P.rowHeight;
+                        textAnchor = 'end';
+                    }
                     el.append('text')
-                        .attr('x', myOffset + P.rowHeight / 2)
+                        .attr('x', x)
                         .attr('y', offsetY + P.rowHeight + rowHeight + P.padding)
                         .attr('font-size', O.legendFontSize)
-                        .attr('text-anchor', 'middle')
+                        .attr('text-anchor', textAnchor)
                         .style('fill', O.theme.textColor)
                         .text(label);
-                    myOffset += size * P.geomSize + P.padding;
+                    myOffset += P.geomSize + P.padding;
                 });
             }
             if (legend.geom === 'funkyrect') {
@@ -562,11 +661,20 @@ class FHeatmap {
                         'transform',
                         `translate(${myOffset}, ${offsetY + P.rowHeight / 2 - geomHeight / 2})`
                     );
+                    let x = myOffset + P.rowHeight / 2 - geomWidth / 2;
+                    let textAnchor = 'start';
+                    if (legend.label_align === 'center') {
+                        x += geomWidth / 2;
+                        textAnchor = 'middle';
+                    } else if (legend.label_align === 'right') {
+                        x += geomWidth;
+                        textAnchor = 'end';
+                    }
                     el.append('text')
-                        .attr('x', myOffset + P.rowHeight / 2)
+                        .attr('x', x)
                         .attr('y', offsetY + P.rowHeight + rowHeight + P.padding)
                         .attr('font-size', O.legendFontSize)
-                        .attr('text-anchor', 'middle')
+                        .attr('text-anchor', textAnchor)
                         .style('fill', O.theme.textColor)
                         .text(label);
                     myOffset += geomWidth + P.padding;
@@ -584,11 +692,20 @@ class FHeatmap {
                         'transform',
                         `translate(${myOffset}, ${offsetY + P.rowHeight / 2 - geomHeight / 2})`
                     );
+                    let x = myOffset + P.rowHeight / 2 - geomWidth / 2;
+                    let textAnchor = 'start';
+                    if (legend.label_align === 'center') {
+                        x += geomWidth / 2;
+                        textAnchor = 'middle';
+                    } else if (legend.label_align === 'right') {
+                        x += geomWidth;
+                        textAnchor = 'end';
+                    }
                     el.append('text')
-                        .attr('x', myOffset + P.rowHeight / 2)
+                        .attr('x', x)
                         .attr('y', offsetY + P.rowHeight + rowHeight + P.padding)
                         .attr('font-size', O.legendFontSize)
-                        .attr('text-anchor', 'middle')
+                        .attr('text-anchor', textAnchor)
                         .style('fill', O.theme.textColor)
                         .text(label);
                     myOffset += geomWidth + P.padding;
@@ -765,7 +882,11 @@ class FHeatmap {
             .html(text)
             .style("top", mouse[1] + 2 * offset + "px")
             .style("left", mouse[0] + offset + "px")
-            .style("display", "block");
+            .style("display", "block")
+            .style("visibility", "none");
+        const { height } = this.tooltip.node().getBoundingClientRect();
+        this.tooltip.style("top", mouse[1] - height + "px")
+            .style("visibility", "visible");
     }
 
     onMouseMove(e) {
@@ -798,6 +919,13 @@ class FHeatmap {
             return comparator(a, b);
         })));
         this.data = data;
+        const colData = rowToColData(data);
+        this.columnInfo.forEach(column => {
+            column.data = colData[column.id];
+            if (column.numeric) {
+                column.maybeCalculateStats();
+            }
+        });
         this.svg.selectChildren().remove();
         this.render();
 
@@ -832,9 +960,9 @@ class FHeatmap {
     }
 
     render() {
-        this.header = this.svg.append("g");
-        this.body = this.svg.append("g");
-        this.footer = this.svg.append("g");
+        this.header = this.svg.append('g');
+        this.body = this.svg.append('g');
+        this.footer = this.svg.append('g');
 
         this.renderStripedRows();
         this.renderData();
@@ -850,7 +978,7 @@ class FHeatmap {
             this.header.attr('transform', `translate(0, ${P.rowHeight})`);
         }
         this.body.selectAll('.row').attr('width', P.bodyWidth);
-        this.body.attr("transform", `translate(0, ${P.headerHeight})`);
+        this.body.attr('transform', `translate(0, ${P.headerHeight})`);
         this.footer.attr('transform', `translate(${P.footerOffset}, ${P.headerHeight + P.bodyHeight})`);
         this.svg.attr('style', '');
         if (O.rootStyle) {
@@ -859,28 +987,32 @@ class FHeatmap {
     }
 
     listen() {
-        this.svg.on("mousemove", this.onMouseMove.bind(this));
+        this.svg.on('mousemove', this.onMouseMove.bind(this));
+        this.svg.on('mouseleave', this.hideTooltip.bind(this));
     }
 };
 
 
 /**
  * The main entry point for the library. Takes data and various configuration options and returns
- * an SVG element with the heatmap.
+ * an SVG element with the heatmap. Internally uses {@link FunkyHeatmap}. Creates a new SVG element
+ * and adds it to the DOM immediately, and renders the heatmap offscreen, to be able to calculate
+ * the dimensions of text and other elements.
  *
- * @param {Object|Object[]} data - data to plot, usually d3-fetch output.
- *      It should be an Array of Objects, each object has the same properties.
- * @param {Object|Object[]} columnInfo - information about how the columns should be displayed
- * @param {Object|Object[]} rowInfo - information about how the rows should be displayed
- * @param {Object|Object[]} columnGroups - information about how to group columns
- * @param {Object|Object[]} rowGroups - information about how to group rows
- * @param {Object} palettes - mapping of names to palette colors, see {@link module:palettes.assignPalettes}
- * @param {Object|Object[]} legends - a list of legends to add to the plot
- * @param {Object} positionArgs - positioning arguments, see {@link PositionArgs}
- * @param {Object} options - options for the heatmap
- * @param {int} options.fontSize - font size for all text
+ * @param {ColumnData|RowData} data - data to plot, usually d3-fetch output
+ * @param {ColumnData|module:columns~ColumnInfo[]} columnInfo - information about how the columns
+ *   should be displayed. If not specified, all columns from `data` will be displayed.
+ *   See {@link module:columns~ColumnInfo|ColumnInfo}, {@link module:columns.Column|Column}
+ * @param {ColumnData|RowData} rowInfo - information about how the rows should be displayed
+ * @param {ColumnData|module:columns~ColumnGroup[]} columnGroups - information about how to group
+ *   columns. See {@link module:columns~ColumnGroup|ColumnGroup}
+ * @param {ColumnData|RowData} rowGroups - information about how to group rows
+ * @param {module:palettes~PaletteMapping} palettes - mapping of names to palette colors
+ * @param {ColumnData|RowData} legends - a list of legends to add to the plot
+ * @param {PositionOptions} positionArgs - positioning options, see {@link PositionArgs}
+ * @param {HeatmapOptions} options - options for the heatmap
  * @param {boolean} scaleColumn - whether to apply min-max scaling to numerical
- *      columns. Defaults to true
+ *   columns. Defaults to true
  *
  * @returns {SVGElement} - the SVG element containing the heatmap
  *
@@ -897,14 +1029,13 @@ function funkyheatmap(
     options = {},
     scaleColumn = true
 ) {
-    [data, columnInfo, columnGroups, rowInfo, rowGroups, legends] = maybeConvertDataframe(
+    [data, columnInfo, columnGroups, rowInfo, rowGroups, legends] = ensureRowData(
         data, columnInfo, columnGroups, rowInfo, rowGroups, legends
     );
-    const columns = columnInfo.map(column => column.id);
-    columnInfo = buildColumnInfo(data, columns, columnInfo, scaleColumn, options.colorByRank);
-    columnGroups = buildColumnGroups(columnGroups, columnInfo);
-    legends = prepareLegends(legends, palettes, columnInfo);
-    assignPalettes(columnInfo, palettes);
+    const columns = createColumns(data, columnInfo, scaleColumn, options.colorByRank);
+    columnGroups = buildColumnGroups(columnGroups, columns);
+    legends = prepareLegends(legends, palettes, columns);
+    assignPalettes(columns, palettes);
     assignPalettes(legends, palettes);
 
     const svg = d3.select('body')
@@ -913,9 +1044,9 @@ function funkyheatmap(
             .style('visibility', 'hidden')
             .style('position', 'absolute')
             .style('left', '-2000px');
-    const heatmap = new FHeatmap(
+    const heatmap = new FunkyHeatmap(
         data,
-        columnInfo,
+        columns,
         columnGroups,
         rowInfo,
         rowGroups,

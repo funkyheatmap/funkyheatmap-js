@@ -1,7 +1,7 @@
 import * as d3 from 'd3';
 
 import funkyheatmap from '../src/main';
-import { convertToDataframe } from '../src/input_util';
+import { rowToColData } from '../src/input_util';
 
 if (module.hot) {
     module.hot.accept(() => {
@@ -31,7 +31,7 @@ function prepareData(data) {
         item.output_img = OUTPUT_IMG[item.output];
     });
 
-    data = convertToDataframe(data);
+    data = rowToColData(data);
 
     const RANKS = {
         'rank_pancreas': 'label_pancreas',
@@ -49,7 +49,7 @@ function prepareData(data) {
 
     function labelTop3(vector) {
         // d3.rank behaves like R `rank` with `ties.method = "min"`
-        let ranks = d3.rank(vector);
+        let ranks = d3.rank(vector.map(i => +i));
         return ranks.map(rank => {
             if (rank < 3) {
                 return (rank + 1).toString();
@@ -60,8 +60,8 @@ function prepareData(data) {
 
     for (let [rank, label] of Object.entries(RANKS)) {
         data[label] = labelTop3(data[rank]);
-        const [min, max] = d3.extent(data[rank]);
-        data[rank] = data[rank].map(x => (-x + min) / (min - max));
+        const [min, max] = d3.extent(data[rank].map(i => +i));
+        data[rank] = data[rank].map(x => 1 - (x - min) / (max - min));
     }
 
     return data;
@@ -69,7 +69,7 @@ function prepareData(data) {
 
 const column_info = [
     {id: "id", name: "Rank", geom: "text", group: "Method", options: {align: "right"}},
-    {id: "method", name: "Method", geom: "text", group: "Method", options: {hjust: 0}},
+    {id: "method", name: "Method", geom: "text", group: "Method"},
     {id: "output_img", name: "Output", geom: "image", group: "Method", options: {width: 20}},
     {id: "features", id_color: "features", name: "Features", geom: "text", group: "Method", options: {palette: "features"}},
     {id: "scaling", name: "Scaling", geom: "text", group: "Method", options: {fontSize: 18, align: "center"}},
@@ -104,6 +104,13 @@ const palettes = {
 };
 
 const legends = [
+    {
+        title: "Output",
+        geom: "image",
+        size: 20,
+        values: ["matrix.png", "embedding.png", "graph.png"],
+        labels: ["Genes", "Embedding", "Graph"],
+    },
     {
         title: "Scaling",
         geom: "text",
@@ -147,12 +154,12 @@ d3.csv('scib_summary.csv').then((data) => {
         data,
         column_info,
         undefined, // row info
-        column_groups, // column_groups,
+        column_groups,
         undefined, // row groups
         palettes,
         legends, // legends
-        {rowHeight: 28, expand_ymax: 20},
-        {
+        {rowHeight: 28}, // position options
+        { // heatmap options
             labelGroupsAbc: false,
             colorByRank: false
         },
